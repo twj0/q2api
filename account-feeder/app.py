@@ -2,6 +2,7 @@
 Amazon Q 账号投喂服务
 用于让其他人通过 URL 登录投喂账号到主服务
 """
+
 import json
 import asyncio
 import uuid
@@ -134,6 +135,7 @@ async def poll_for_tokens(
     }
 
     import time
+
     now = time.time()
     upstream_deadline = now + max(1, int(expires_in))
     cap_deadline = now + max_timeout_sec if max_timeout_sec > 0 else upstream_deadline
@@ -189,7 +191,7 @@ async def auth_start(body: Optional[AuthStartRequest] = None):
         "expiresIn": device_data["expiresIn"],
         "label": body.label if body else None,
         "enabled": body.enabled if body else True,
-        "status": "pending"
+        "status": "pending",
     }
 
     return {
@@ -197,7 +199,7 @@ async def auth_start(body: Optional[AuthStartRequest] = None):
         "verificationUriComplete": device_data["verificationUriComplete"],
         "userCode": device_data["userCode"],
         "expiresIn": device_data["expiresIn"],
-        "interval": device_data["interval"]
+        "interval": device_data["interval"],
     }
 
 
@@ -220,7 +222,7 @@ async def auth_claim(auth_id: str):
             device_code=session["deviceCode"],
             interval=session["interval"],
             expires_in=session["expiresIn"],
-            max_timeout_sec=300
+            max_timeout_sec=300,
         )
 
         # 调用原服务创建账号
@@ -230,14 +232,14 @@ async def auth_claim(auth_id: str):
             "clientSecret": session["clientSecret"],
             "refreshToken": tokens.get("refreshToken"),
             "accessToken": tokens.get("accessToken"),
-            "enabled": False
+            "enabled": False,
         }
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
                 f"{API_SERVER}/v2/accounts",
                 json=account_data,
-                headers={"content-type": "application/json"}
+                headers={"content-type": "application/json"},
             )
             r.raise_for_status()
             account = r.json()
@@ -245,22 +247,22 @@ async def auth_claim(auth_id: str):
         # 更新会话状态
         session["status"] = "completed"
 
-        return {
-            "status": "completed",
-            "account": account
-        }
+        return {"status": "completed", "account": account}
 
     except TimeoutError as e:
         raise HTTPException(status_code=408, detail=str(e))
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=e.response.status_code, detail=f"创建账号失败: {e.response.text}")
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"创建账号失败: {e.response.text}",
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"未知错误: {str(e)}")
 
 
 @app.post("/accounts/create")
 async def create_account(account: AccountCreate):
-    """创建单个账号（调用原服务）"""
+    """创建单个账号（调用主服务统一feed接口）"""
     try:
         account_data = {
             "label": account.label or "手动投喂账号",
@@ -268,14 +270,16 @@ async def create_account(account: AccountCreate):
             "clientSecret": account.clientSecret,
             "refreshToken": account.refreshToken,
             "accessToken": account.accessToken,
-            "enabled": False
         }
+        
+        # 包装成列表以调用新的批量接口
+        batch_request = {"accounts": [account_data]}
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             r = await client.post(
-                f"{API_SERVER}/v2/accounts",
-                json=account_data,
-                headers={"content-type": "application/json"}
+                f"{API_SERVER}/v2/accounts/feed",
+                json=batch_request,
+                headers={"content-type": "application/json"},
             )
             r.raise_for_status()
             return r.json()
@@ -283,7 +287,7 @@ async def create_account(account: AccountCreate):
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=e.response.status_code,
-            detail=f"创建账号失败: {e.response.text}"
+            detail=f"创建账号失败: {e.response.text}",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"未知错误: {str(e)}")
@@ -291,20 +295,20 @@ async def create_account(account: AccountCreate):
 
 @app.post("/accounts/batch")
 async def batch_create_accounts(request: BatchCreateRequest):
-    """批量创建账号（调用主服务批量接口）"""
+    """批量创建账号（调用主服务统一feed接口）"""
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             r = await client.post(
-                f"{API_SERVER}/v2/accounts/batch",
+                f"{API_SERVER}/v2/accounts/feed",
                 json={"accounts": request.accounts},
-                headers={"content-type": "application/json"}
+                headers={"content-type": "application/json"},
             )
             r.raise_for_status()
             return r.json()
     except httpx.HTTPStatusError as e:
         raise HTTPException(
             status_code=e.response.status_code,
-            detail=f"批量创建失败: {e.response.text}"
+            detail=f"批量创建失败: {e.response.text}",
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"未知错误: {str(e)}")

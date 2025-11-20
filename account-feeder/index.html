@@ -324,7 +324,9 @@ async function createSingle(){
     });
     if (!r.ok) throw new Error(await r.text());
     const j = await r.json();
-    result.textContent = '🎉 账号创建成功！\n\n' + JSON.stringify(j, null, 2);
+    result.textContent = '✅ 请求已提交！\n\n' +
+      '主服务正在后台异步验证账号，请稍后在主服务后台查看最终状态。\n\n' +
+      'API 响应：\n' + JSON.stringify(j, null, 2);
 
     // 清空表单
     document.getElementById('manual_label').value = '';
@@ -365,11 +367,9 @@ async function createBatch(){
     if (!r.ok) throw new Error(await r.text());
     const j = await r.json();
 
-    result.textContent = `✅ 批量创建完成！\n\n` +
-      `成功：${j.success} 个\n` +
-      `失败：${j.failed} 个\n` +
-      `总计：${j.total} 个\n\n` +
-      `详细结果：\n${JSON.stringify(j.results, null, 2)}`;
+    result.textContent = '✅ 请求已提交！\n\n' +
+      `主服务正在后台异步验证 ${accounts.length} 个账号，请稍后在主服务后台查看最终状态。\n\n` +
+      'API 响应：\n' + JSON.stringify(j, null, 2);
   } catch(e){
     result.textContent = '❌ 批量创建失败：' + e.message;
   }

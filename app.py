@@ -1055,6 +1055,7 @@ if CONSOLE_ENABLED:
         now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
         acc_id = str(uuid.uuid4())
         other_str = json.dumps(body.other, ensure_ascii=False) if body.other is not None else None
+        enabled_val = 1 if (body.enabled is None or body.enabled) else 0
         async with _conn() as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute(
@@ -1074,57 +1075,83 @@ if CONSOLE_ENABLED:
                     "never",
                     now,
                     now,
-                    0,
+                    enabled_val,
                 ),
             )
             await conn.commit()
             async with conn.execute("SELECT * FROM accounts WHERE id=?", (acc_id,)) as cursor:
                 row = await cursor.fetchone()
-                account = _row_to_dict(row)
-        
-        verify_success, fail_reason = await verify_account(account)
-        async with _conn() as conn:
-            if verify_success:
-                await conn.execute("UPDATE accounts SET enabled=1, updated_at=? WHERE id=?", (now, acc_id))
-            elif fail_reason:
-                other_dict = json.loads(other_str) if other_str else {}
-                other_dict['failedReason'] = fail_reason
-                await conn.execute("UPDATE accounts SET other=?, updated_at=? WHERE id=?", (json.dumps(other_dict, ensure_ascii=False), now, acc_id))
-            await conn.commit()
-            conn.row_factory = aiosqlite.Row
-            async with conn.execute("SELECT * FROM accounts WHERE id=?", (acc_id,)) as cursor:
-                row = await cursor.fetchone()
                 return _row_to_dict(row)
 
-    @app.post("/v2/accounts/batch")
-    async def batch_create_accounts(request: BatchAccountCreate):
-        results = []
-        success_count = 0
-        failed_count = 0
-        for i, account_data in enumerate(request.accounts):
+
+    async def _verify_and_enable_accounts(account_ids: List[str]):
+        """后台异步验证并启用账号"""
+        for acc_id in account_ids:
             try:
+                # 必须先获取完整的账号信息
+                account = await get_account(acc_id)
+                verify_success, fail_reason = await verify_account(account)
                 now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
-                acc_id = str(uuid.uuid4())
-                other_str = json.dumps(account_data.other, ensure_ascii=False) if account_data.other else None
+                
                 async with _conn() as conn:
-                    await conn.execute(
-                        """
-                        INSERT INTO accounts (id, label, clientId, clientSecret, refreshToken, accessToken, other, last_refresh_time, last_refresh_status, created_at, updated_at, enabled)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (acc_id, account_data.label or f"批量账号 {i+1}", account_data.clientId, account_data.clientSecret, account_data.refreshToken, account_data.accessToken, other_str, None, "never", now, now, 0),
-                    )
+                    if verify_success:
+                        await conn.execute("UPDATE accounts SET enabled=1, updated_at=? WHERE id=?", (now, acc_id))
+                    elif fail_reason:
+                        other_dict = account.get("other", {})
+                        other_dict['failedReason'] = fail_reason
+                        await conn.execute("UPDATE accounts SET other=?, updated_at=? WHERE id=?", (json.dumps(other_dict, ensure_ascii=False), now, acc_id))
                     await conn.commit()
-                    conn.row_factory = aiosqlite.Row
-                    async with conn.execute("SELECT * FROM accounts WHERE id=?", (acc_id,)) as cursor:
-                        row = await cursor.fetchone()
-                        account = _row_to_dict(row)
-                results.append({"index": i, "status": "success", "account": account})
-                success_count += 1
             except Exception as e:
-                results.append({"index": i, "status": "failed", "error": str(e)})
-                failed_count += 1
-        return {"total": len(request.accounts), "success": success_count, "failed": failed_count, "results": results}
+                print(f"Error verifying account {acc_id}: {e}")
+                traceback.print_exc()
+
+    @app.post("/v2/accounts/feed")
+    async def create_accounts_feed(request: BatchAccountCreate):
+        """
+        统一的投喂接口，接收账号列表，立即存入并后台异步验证。
+        """
+        now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime())
+        new_account_ids = []
+        
+        async with _conn() as conn:
+            for i, account_data in enumerate(request.accounts):
+                acc_id = str(uuid.uuid4())
+                other_dict = account_data.other or {}
+                other_dict['source'] = 'feed'
+                other_str = json.dumps(other_dict, ensure_ascii=False)
+                
+                await conn.execute(
+                    """
+                    INSERT INTO accounts (id, label, clientId, clientSecret, refreshToken, accessToken, other, last_refresh_time, last_refresh_status, created_at, updated_at, enabled)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        acc_id,
+                        account_data.label or f"批量账号 {i+1}",
+                        account_data.clientId,
+                        account_data.clientSecret,
+                        account_data.refreshToken,
+                        account_data.accessToken,
+                        other_str,
+                        None,
+                        "never",
+                        now,
+                        now,
+                        0,  # 初始为禁用状态
+                    ),
+                )
+                new_account_ids.append(acc_id)
+            await conn.commit()
+
+        # 启动后台任务进行验证，不阻塞当前请求
+        if new_account_ids:
+            asyncio.create_task(_verify_and_enable_accounts(new_account_ids))
+
+        return {
+            "status": "processing",
+            "message": f"{len(new_account_ids)} accounts received and are being verified in the background.",
+            "account_ids": new_account_ids
+        }
 
     @app.get("/v2/accounts")
     async def list_accounts():
