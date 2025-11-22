@@ -623,6 +623,7 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
     
     # Always stream from upstream to get full event details
     event_iter = None
+    first_event_received = False
     try:
         access = account.get("accessToken")
         if not access:
@@ -643,8 +644,6 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
              raise HTTPException(status_code=502, detail="No event stream returned")
 
         # Handler
-        # Estimate input tokens (simple count or 0)
-        # For now 0 or simple len
         # Calculate input tokens
         text_to_count = ""
         if req.system:
@@ -666,8 +665,27 @@ async def claude_messages(req: ClaudeRequest, account: Dict[str, Any] = Depends(
         input_tokens = count_tokens(text_to_count, apply_multiplier=True)
         handler = ClaudeStreamHandler(model=req.model, input_tokens=input_tokens)
 
+        # Try to get the first event to ensure the connection is valid
+        # This allows us to return proper HTTP error codes before starting the stream
+        first_event = None
+        try:
+            first_event = await event_iter.__anext__()
+            first_event_received = True
+        except StopAsyncIteration:
+            raise HTTPException(status_code=502, detail="Empty response from upstream")
+        except Exception as e:
+            # If we get an error before the first event, we can still return proper status code
+            raise HTTPException(status_code=502, detail=f"Upstream error: {str(e)}")
+
         async def event_generator():
             try:
+                # Process the first event we already fetched
+                if first_event:
+                    event_type, payload = first_event
+                    async for sse in handler.handle_event(event_type, payload):
+                        yield sse
+                
+                # Process remaining events
                 async for event_type, payload in event_iter:
                     async for sse in handler.handle_event(event_type, payload):
                         yield sse
